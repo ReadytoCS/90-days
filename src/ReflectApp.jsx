@@ -1,5 +1,14 @@
 import React, { useState, useEffect } from 'react';
 import { storage, storageService } from './lib/storage';
+import {
+  isPushSupported,
+  subscribeToPush,
+  unsubscribeFromPush,
+  getSubscriptionStatus,
+  updateNotificationPreferences,
+  getNotificationPreferences,
+  sendTestPush
+} from './lib/pushNotifications';
 
 // Utilities with timezone fix
 const utils = {
@@ -38,6 +47,10 @@ export default function ReflectApp() {
   const [toast, setToast] = useState(null);
   const [undoData, setUndoData] = useState(null);
   const [lastLog, setLastLog] = useState(null);
+  const [notifMorning, setNotifMorning] = useState(false);
+  const [notifEvening, setNotifEvening] = useState(false);
+  const [pushSupported, setPushSupported] = useState(false);
+  const [pushSubscribed, setPushSubscribed] = useState(false);
 
   const today = utils.today();
   const todayLog = logs.find(l => l.date === today);
@@ -101,6 +114,47 @@ export default function ReflectApp() {
     };
     loadAllGoals();
   }, [goals]);
+
+  // Load push notification status
+  useEffect(() => {
+    const loadPushStatus = async () => {
+      const supported = isPushSupported();
+      setPushSupported(supported);
+      
+      if (supported) {
+        const status = await getSubscriptionStatus();
+        setPushSubscribed(status.subscribed);
+        
+        const prefs = await getNotificationPreferences();
+        setNotifMorning(prefs.morning);
+        setNotifEvening(prefs.evening);
+      }
+    };
+    loadPushStatus();
+  }, []);
+
+  // Handle navigation from notification clicks
+  useEffect(() => {
+    const handleNavigate = (event) => {
+      if (event.detail && event.detail.view) {
+        setView(event.detail.view);
+        // Update URL without reload
+        const newUrl = new URL(window.location);
+        newUrl.searchParams.set('view', event.detail.view);
+        window.history.pushState({}, '', newUrl);
+      }
+    };
+    
+    // Check URL params on load
+    const urlParams = new URLSearchParams(window.location.search);
+    const viewParam = urlParams.get('view');
+    if (viewParam && ['morning', 'evening', 'settings'].includes(viewParam)) {
+      setView(viewParam);
+    }
+    
+    window.addEventListener('navigate', handleNavigate);
+    return () => window.removeEventListener('navigate', handleNavigate);
+  }, []);
   
   const pastQuarters = [...new Set(allGoalsState.map(g => g.qtr))].filter(q => q !== qtr.key).sort().reverse();
   const weekDates = utils.weekDates(weekOff);
@@ -231,7 +285,10 @@ export default function ReflectApp() {
             </div>
           )}
           {!todayLog?.closed && !todayLog?.intention && <button onClick={skipDay} style={{ padding: 14, background: 'transparent', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 12, color: 'rgba(255,255,255,0.4)', fontSize: 14, cursor: 'pointer' }}>Skip Today (rest day, traveling)</button>}
-          <button onClick={() => { utils.haptic(); setView('history'); }} style={{ padding: '16px 20px', background: 'rgba(255,255,255,0.06)', border: 'none', borderRadius: 14, color: '#fff', fontSize: 15, fontWeight: 500, cursor: 'pointer' }}>History</button>
+          <div style={{ display: 'flex', gap: 10 }}>
+            <button onClick={() => { utils.haptic(); setView('history'); }} style={{ flex: 1, padding: '16px 20px', background: 'rgba(255,255,255,0.06)', border: 'none', borderRadius: 14, color: '#fff', fontSize: 15, fontWeight: 500, cursor: 'pointer' }}>History</button>
+            <button onClick={() => { utils.haptic(); setView('settings'); }} style={{ padding: '16px 20px', background: 'rgba(255,255,255,0.06)', border: 'none', borderRadius: 14, color: '#fff', fontSize: 15, fontWeight: 500, cursor: 'pointer' }}>⚙️</button>
+          </div>
         </div>
       )}
 
@@ -389,6 +446,195 @@ export default function ReflectApp() {
     );
   };
 
+  const Settings = () => {
+    const handleToggleMorning = async (enabled) => {
+      if (enabled && !pushSubscribed) {
+        try {
+          await subscribeToPush()
+          setPushSubscribed(true)
+          showToast('Notifications enabled')
+        } catch (error) {
+          showToast('Failed to enable notifications')
+          console.error(error)
+          return
+        }
+      }
+      
+      setNotifMorning(enabled)
+      await updateNotificationPreferences(enabled, notifEvening)
+      utils.haptic()
+    }
+    
+    const handleToggleEvening = async (enabled) => {
+      if (enabled && !pushSubscribed) {
+        try {
+          await subscribeToPush()
+          setPushSubscribed(true)
+          showToast('Notifications enabled')
+        } catch (error) {
+          showToast('Failed to enable notifications')
+          console.error(error)
+          return
+        }
+      }
+      
+      setNotifEvening(enabled)
+      await updateNotificationPreferences(notifMorning, enabled)
+      utils.haptic()
+    }
+    
+    const handleUnsubscribe = async () => {
+      try {
+        await unsubscribeFromPush()
+        setPushSubscribed(false)
+        setNotifMorning(false)
+        setNotifEvening(false)
+        await updateNotificationPreferences(false, false)
+        showToast('Notifications disabled')
+        utils.haptic()
+      } catch (error) {
+        showToast('Failed to disable notifications')
+        console.error(error)
+      }
+    }
+    
+    return (
+      <div style={{ padding: '24px 24px calc(env(safe-area-inset-bottom, 20px) + 24px)', maxWidth: 500, margin: '0 auto' }}>
+        <div style={{ paddingTop: 'env(safe-area-inset-top, 0)' }}><Back fn={() => setView('home')} /></div>
+        <div style={{ marginBottom: 32 }}>
+          <p style={{ color: 'rgba(255,255,255,0.4)', margin: '0 0 8px', fontSize: 13, textTransform: 'uppercase' }}>Settings</p>
+          <h1 style={{ margin: 0, fontSize: 26, fontWeight: 300, color: '#fff' }}>Notifications</h1>
+        </div>
+        
+        {!pushSupported ? (
+          <div style={{ background: 'rgba(255,255,255,0.04)', borderRadius: 16, padding: 24, textAlign: 'center' }}>
+            <p style={{ color: 'rgba(255,255,255,0.5)', margin: 0, fontSize: 15 }}>Push notifications are not supported in this browser</p>
+          </div>
+        ) : (
+          <>
+            <div style={{ background: 'rgba(255,255,255,0.04)', borderRadius: 16, padding: 20, marginBottom: 16 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+                <div>
+                  <p style={{ color: '#fff', margin: '0 0 4px', fontSize: 16, fontWeight: 500 }}>Morning reminder</p>
+                  <p style={{ color: 'rgba(255,255,255,0.4)', margin: 0, fontSize: 13 }}>8:00 AM</p>
+                </div>
+                <button
+                  onClick={() => handleToggleMorning(!notifMorning)}
+                  disabled={!pushSubscribed && !notifMorning}
+                  style={{
+                    width: 52,
+                    height: 32,
+                    borderRadius: 16,
+                    background: (pushSubscribed && notifMorning) ? '#3b82f6' : 'rgba(255,255,255,0.2)',
+                    border: 'none',
+                    cursor: (!pushSubscribed && !notifMorning) ? 'not-allowed' : 'pointer',
+                    position: 'relative',
+                    transition: 'background 0.3s',
+                    opacity: (!pushSubscribed && !notifMorning) ? 0.5 : 1
+                  }}
+                >
+                  <div style={{
+                    width: 24,
+                    height: 24,
+                    borderRadius: '50%',
+                    background: '#fff',
+                    position: 'absolute',
+                    top: 4,
+                    left: (pushSubscribed && notifMorning) ? 24 : 4,
+                    transition: 'left 0.3s'
+                  }} />
+                </button>
+              </div>
+              <p style={{ color: 'rgba(255,255,255,0.3)', margin: '12px 0 0', fontSize: 12 }}>Set your 60-second intention</p>
+            </div>
+            
+            <div style={{ background: 'rgba(255,255,255,0.04)', borderRadius: 16, padding: 20, marginBottom: 24 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+                <div>
+                  <p style={{ color: '#fff', margin: '0 0 4px', fontSize: 16, fontWeight: 500 }}>Evening reminder</p>
+                  <p style={{ color: 'rgba(255,255,255,0.4)', margin: 0, fontSize: 13 }}>8:00 PM</p>
+                </div>
+                <button
+                  onClick={() => handleToggleEvening(!notifEvening)}
+                  disabled={!pushSubscribed && !notifEvening}
+                  style={{
+                    width: 52,
+                    height: 32,
+                    borderRadius: 16,
+                    background: (pushSubscribed && notifEvening) ? '#8b5cf6' : 'rgba(255,255,255,0.2)',
+                    border: 'none',
+                    cursor: (!pushSubscribed && !notifEvening) ? 'not-allowed' : 'pointer',
+                    position: 'relative',
+                    transition: 'background 0.3s',
+                    opacity: (!pushSubscribed && !notifEvening) ? 0.5 : 1
+                  }}
+                >
+                  <div style={{
+                    width: 24,
+                    height: 24,
+                    borderRadius: '50%',
+                    background: '#fff',
+                    position: 'absolute',
+                    top: 4,
+                    left: (pushSubscribed && notifEvening) ? 24 : 4,
+                    transition: 'left 0.3s'
+                  }} />
+                </button>
+              </div>
+              <p style={{ color: 'rgba(255,255,255,0.3)', margin: '12px 0 0', fontSize: 12 }}>Do your 90-second reflection</p>
+            </div>
+            
+            {pushSubscribed && (
+              <>
+                <button
+                  onClick={async () => {
+                    try {
+                      utils.haptic()
+                      await sendTestPush()
+                      showToast('Test notification sent!')
+                    } catch (error) {
+                      showToast('Failed to send test: ' + (error.message || 'Unknown error'))
+                      console.error(error)
+                    }
+                  }}
+                  style={{
+                    width: '100%',
+                    padding: 14,
+                    marginBottom: 12,
+                    background: 'rgba(59,130,246,0.1)',
+                    border: '1px solid rgba(59,130,246,0.3)',
+                    borderRadius: 12,
+                    color: '#3b82f6',
+                    fontSize: 14,
+                    fontWeight: 500,
+                    cursor: 'pointer'
+                  }}
+                >
+                  Send test push
+                </button>
+                <button
+                  onClick={handleUnsubscribe}
+                  style={{
+                    width: '100%',
+                    padding: 14,
+                    background: 'transparent',
+                    border: '1px solid rgba(255,255,255,0.1)',
+                    borderRadius: 12,
+                    color: 'rgba(255,255,255,0.5)',
+                    fontSize: 14,
+                    cursor: 'pointer'
+                  }}
+                >
+                  Disable all notifications
+                </button>
+              </>
+            )}
+          </>
+        )}
+      </div>
+    )
+  }
+
   const Onboard = () => (
     <div style={{ padding: '24px 24px calc(env(safe-area-inset-bottom, 20px) + 24px)', maxWidth: 500, margin: '0 auto', minHeight: '100vh', display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
       <div style={{ marginBottom: 40, textAlign: 'center', paddingTop: 'env(safe-area-inset-top, 0)' }}>
@@ -410,7 +656,7 @@ export default function ReflectApp() {
       <style>{`* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; } input::placeholder, textarea::placeholder { color: rgba(255,255,255,0.25); } @keyframes scaleIn { from { transform: scale(0.8); opacity: 0; } to { transform: scale(1); opacity: 1; } }`}</style>
       <Toast />
       {closed && <Closed />}
-      {showRecap ? <Recap /> : onboard ? <Onboard /> : view==='home' ? <Home /> : view==='morning' ? <Morning /> : view==='evening' ? <Evening /> : <History />}
+      {showRecap ? <Recap /> : onboard ? <Onboard /> : view==='home' ? <Home /> : view==='morning' ? <Morning /> : view==='evening' ? <Evening /> : view==='settings' ? <Settings /> : <History />}
     </div>
   );
 }
